@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="icon" href="data:,">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Twilio Conversations Group Manager</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background-color: #f4f7f9; color: #121C2D; display: flex; justify-content: center; padding: 20px; }
+        .container { background-color: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); width: 100%; max-width: 800px; }
+        h1 { color: #001f3f; text-align: center; margin-bottom: 20px; } /* Twilio Blue */
+        h2, h3 { color: #001f3f; margin-top: 20px; margin-bottom: 10px; }
+        button { background-color: #F22F46; color: white; border: none; padding: 10px 18px; border-radius: 5px; cursor: pointer; margin-top: 10px; font-size: 1em; transition: background-color 0.2s ease; }
+        button:hover { background-color: #D9233B; }
+        button.secondary { background-color: #007bff; }
+        button.secondary:hover { background-color: #0056b3; }
+        .section { margin-bottom: 30px; padding-bottom: 20px; border-bottom: 1px solid #e0e0e0; }
+        .section:last-child { border-bottom: none; }
+        input[type="text"], input[type="tel"], select, textarea { width: calc(100% - 24px); padding: 10px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 5px; box-sizing: border-box; font-size: 0.95em; }
+        textarea { min-height: 80px; }
+        label { display: block; margin-bottom: 6px; font-weight: 600; color: #333; }
+        .hidden { display: none; }
+        ul { list-style-type: none; padding: 0; }
+        li.list-item { background-color: #f8f9fa; border: 1px solid #dee2e6; padding: 12px; margin-bottom: 8px; border-radius: 5px; display: flex; justify-content: space-between; align-items: center; }
+        .actions button { margin-left: 8px; padding: 6px 12px; font-size: 0.85em; }
+        .checkbox-group div { margin-bottom: 5px; }
+        .checkbox-group label { font-weight: normal; margin-left: 5px; }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgba(0,0,0,0.5); }
+        .modal-content { background-color: #fefefe; margin: 10% auto; padding: 25px; border: 1px solid #888; width: 90%; max-width: 550px; border-radius: 8px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
+        .close-button { color: #aaa; float: right; font-size: 30px; font-weight: bold; cursor: pointer; line-height: 0.6; }
+        .close-button:hover, .close-button:focus { color: black; text-decoration: none; }
+        #sdk-status { font-weight: bold; margin-top: 10px; }
+        #group-participants-select, #update-group-add-participants-select { max-height: 150px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; background-color: #f9f9f9; border-radius: 4px; margin-bottom:10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Twilio Conversations Group Manager</h1>
+
+        <div class="section" id="init-section">
+            <h2>Initialization</h2>
+            <label for="token-identity">Identity (e.g., your Flex Worker SID or unique user ID):</label>
+            <input type="text" id="token-identity" placeholder="Enter your identity">
+            <button id="initialize-sdk-button">Initialize Conversations SDK</button>
+            <p id="sdk-status">SDK Status: Not Initialized</p>
+        </div>
+
+        <div class="section hidden" id="contacts-section">
+            <h2>Contacts Management</h2>
+            <div>
+                <h3>Add New Contact</h3>
+                <label for="contact-name">Name:</label>
+                <input type="text" id="contact-name" placeholder="Contact Name">
+                <label for="contact-id">WhatsApp Number (e.g., whatsapp:+1234567890) or Client ID (e.g., client:flex_agent_alice):</label>
+                <input type="text" id="contact-id" placeholder="whatsapp:+1... or client:...">
+                <label for="contact-team">Team (Optional):</label>
+                <input type="text" id="contact-team" placeholder="Team Name">
+                <button id="add-contact-button">Add Contact</button>
+            </div>
+            <div>
+                <h3>My Contacts</h3>
+                <ul id="contacts-list"></ul>
+            </div>
+        </div>
+
+        <div class="section hidden" id="groups-section">
+            <h2>Group Conversations Management</h2>
+            <div>
+                <h3>Create New Group</h3>
+                <label for="group-name">Group Name:</label>
+                <input type="text" id="group-name" placeholder="Group Chat Name">
+                <label for="group-description">Group Description (Optional):</label>
+                <textarea id="group-description" placeholder="Purpose of the group"></textarea>
+                <label for="group-twilio-number">Twilio Phone Number for Group (e.g., +12345678900):</label>
+                <input type="tel" id="group-twilio-number" placeholder="+12345678900 (for WhatsApp initiation)">
+                <label>Select Participants:</label>
+                <div id="group-participants-select" class="checkbox-group"></div>
+                <button id="create-group-button">Create Group</button>
+            </div>
+<div id="group-list-controls" style="padding-bottom: 20px; border-bottom: 1px solid #eee; margin-bottom: 20px;">
+                <h4>Filter and Sort Groups</h4>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                    <div>
+                        <label for="search-groups-input">Search by Name/Description:</label>
+                        <input type="text" id="search-groups-input" placeholder="Enter search term...">
+                    </div>
+                    <div>
+                        <label for="filter-group-state-select">Filter by State:</label>
+                        <select id="filter-group-state-select">
+                            <option value="">All States</option>
+                            <option value="active">Active</option>
+                            <option value="inactive">Inactive</option>
+                            <option value="closed">Closed</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="order-groups-by-select">Order by:</label>
+                        <select id="order-groups-by-select">
+                            <option value="friendlyName">Name</option>
+                            <option value="dateUpdated">Last Updated</option>
+                            <option value="dateCreated">Date Created</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="order-groups-direction-select">Direction:</label>
+                        <select id="order-groups-direction-select">
+                            <option value="asc">Ascending</option>
+                            <option value="desc">Descending</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+            <div>
+                <h3>Existing Groups</h3>
+                <ul id="groups-list"></ul>
+            </div>
+        </div>
+    </div>
+
+    <div id="chat-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="closeModal('chat-modal')">&times;</span>
+            <h3>Chat: <span id="chat-group-name-modal"></span></h3>
+            <div id="chat-messages" style="height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; margin-bottom: 10px;"></div>
+            <textarea id="chat-input" placeholder="Type a message..." style="width: 100%; min-height: 50px;"></textarea>
+            <button id="send-chat-message-button">Send</button>
+        </div>
+    </div>
+
+
+    <div id="notify-group-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="closeModal('notify-group-modal')">&times;</span>
+            <h3>Notify Group: <span id="notify-group-name-modal"></span></h3>
+            <input type="hidden" id="notify-group-sid-modal">
+            <label for="notify-message">Message:</label>
+            <textarea id="notify-message" placeholder="Type your message to the group"></textarea>
+            <button id="send-notify-message-button">Send Notification</button>
+        </div>
+    </div>
+
+    <div id="update-group-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-button" onclick="closeModal('update-group-modal')">&times;</span>
+            <h3>Update Group: <span id="update-group-name-display-modal"></span></h3>
+            <input type="hidden" id="update-group-sid-modal">
+
+            <h4>Edit Details</h4>
+            <label for="update-group-name-modal">New Group Name:</label>
+            <input type="text" id="update-group-name-modal">
+            <label for="update-group-description-modal">New Group Description:</label>
+            <textarea id="update-group-description-modal"></textarea>
+            <button id="save-group-details-button">Save Details</button>
+            <hr style="margin: 20px 0;">
+
+            <h4>Manage Participants</h4>
+            <label>Add Participants:</label>
+            <div id="update-group-add-participants-select" class="checkbox-group"></div>
+            <button id="add-participants-button-modal" class="secondary">Add Selected Participants</button>
+            <br><br>
+            <label>Current Participants (Click to Remove):</label>
+            <ul id="update-group-current-participants-list"></ul>
+        </div>
+    </div>
+
+    <script src="https://media.twiliocdn.com/sdk/js/conversations/v2.3/twilio-conversations.min.js"></script>
+    <script src="app.js" defer></script>
+</body>
+</html>
