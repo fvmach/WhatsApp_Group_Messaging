@@ -51,8 +51,9 @@
                 <h3>Add New Contact</h3>
                 <label for="contact-name">Name:</label>
                 <input type="text" id="contact-name" placeholder="Contact Name">
-                <label for="contact-id">WhatsApp Number (e.g., whatsapp:+1234567890) or Client ID (e.g., client:flex_agent_alice):</label>
-                <input type="text" id="contact-id" placeholder="whatsapp:+1... or client:...">
+                <!-- Updated label and placeholder to reflect new input requirements for phone numbers -->
+                <label for="contact-id">Phone Number (e.g., +1234567890) or Client ID (e.g., client:flex_agent_alice):</label>
+                <input type="text" id="contact-id" placeholder="+1... or client:...">
                 <label for="contact-team">Team (Optional):</label>
                 <input type="text" id="contact-team" placeholder="Team Name">
                 <button id="add-contact-button">Add Contact</button>
@@ -161,6 +162,32 @@
             <label>Current Participants (Click to Remove):</label>
             <ul id="update-group-current-participants-list"></ul>
         </div>
+    </div>
+
+    <!-- Invite Flex Agent Modal -->
+<div id="invite-flex-modal" class="modal">
+  <div class="modal-content">
+    <h2>Invite Flex Agent</h2>
+    <p id="invite-flex-group-name" style="margin-top:-6px;"></p>
+    <input type="hidden" id="invite-flex-conversation-sid" />
+
+    <div style="display:grid; gap:8px; grid-template-columns: 1fr 1fr;">
+      <div>
+        <label><strong>Select Workers (multi)</strong></label>
+        <select id="invite-workers-select" multiple size="10" style="width:100%;"></select>
+      </div>
+      <div>
+        <label><strong>Select Queue (single)</strong></label>
+        <select id="invite-queue-select" size="10" style="width:100%;"></select>
+      </div>
+    </div>
+
+    <div style="display:flex; gap:8px; margin-top:12px;">
+        <button id="send-flex-invites-button">Send Invites</button>
+        <button class="secondary" onclick="closeModal('invite-flex-modal')">Cancel</button>
+        </div>
+        <small>You can invite one queue, multiple workers, or both.</small>
+    </div>
     </div>
 
     <script src="https://media.twiliocdn.com/sdk/js/conversations/v2.3/twilio-conversations.min.js"></script>

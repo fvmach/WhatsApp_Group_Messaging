@@ -2,11 +2,12 @@
 let conversationsClient = null;
 let userContacts = []; // This will be populated by fetchContacts
 let activeConversations = []; // This will be populated by fetchActiveConversations from your Twilio Function
+let originalActiveConversations = []; 
 const FUNCTION_BASE_URL = 'https://whatsapp-group-messaging-5712.twil.io';
 
 let groupSearchTerm = '';
 let groupFilterState = 'active'; // e.g., 'active', 'inactive', 'closed', or '' for all
-let groupOrderBy = 'lastUpdated'; // Default order: by last updated
+let groupOrderBy = 'dateUpdated'; // Default order: by last updated
 let groupOrderDirection = 'desc';   // Default direction: descending
 let activeIdentity = null;
 
@@ -42,6 +43,12 @@ const updateGroupAddParticipantsSelectEl = document.getElementById('update-group
 const addParticipantsButtonModal = document.getElementById('add-participants-button-modal');
 const updateGroupCurrentParticipantsListEl = document.getElementById('update-group-current-participants-list');
 let searchGroupsInput, filterGroupStateSelect, orderGroupsBySelect, orderGroupsDirectionSelect;
+const inviteFlexModal = document.getElementById('invite-flex-modal');
+const inviteFlexGroupNameEl = document.getElementById('invite-flex-group-name');
+const inviteFlexConversationSidInput = document.getElementById('invite-flex-conversation-sid');
+const inviteWorkersSelect = document.getElementById('invite-workers-select');
+const inviteQueueSelect = document.getElementById('invite-queue-select');
+const sendFlexInvitesButton = document.getElementById('send-flex-invites-button');
 
 // --- API Helper ---
 async function callTwilioFunction(endpoint, method = 'POST', body = {}) {
@@ -207,14 +214,61 @@ function renderContacts() {
         contactsListEl.appendChild(li);
     });
 }
+sendFlexInvitesButton.addEventListener('click', async () => {
+  const conversationSid = inviteFlexConversationSidInput.value;
+  const selectedWorkerSids = Array.from(inviteWorkersSelect.selectedOptions).map(o => o.value);
+  const selectedQueueSid = inviteQueueSelect.value;
+
+  if ((!selectedWorkerSids || selectedWorkerSids.length === 0) && !selectedQueueSid) {
+    alert('Pick at least one worker or a queue.'); return;
+  }
+
+  sendFlexInvitesButton.disabled = true;
+  sendFlexInvitesButton.textContent = 'Sending…';
+
+  try {
+    // Invite queue (if chosen)
+    if (selectedQueueSid) {
+      await callTwilioFunction('invite-flex-agent', 'POST', {
+        conversationSid,
+        queueSid: selectedQueueSid,
+        inviteAttributes: { reason: 'Escalated from group' }
+      });
+    }
+
+    // Invite each worker
+    for (const wk of selectedWorkerSids) {
+      await callTwilioFunction('invite-flex-agent', 'POST', {
+        conversationSid,
+        workerSid: wk,
+        inviteAttributes: { reason: 'Direct agent invite from group' }
+      });
+    }
+
+    alert('Invite(s) sent to Flex.');
+    closeModal('invite-flex-modal');
+
+  } catch (e) {
+    console.error('Failed to send invites:', e);
+    alert('Failed to send one or more invites. See console.');
+  } finally {
+    sendFlexInvitesButton.disabled = false;
+    sendFlexInvitesButton.textContent = 'Send Invites';
+  }
+});
 
 addContactButton.addEventListener('click', async () => {
     const name = contactNameInput.value.trim();
     const identifier = contactIdInput.value.trim();
     const team = contactTeamInput.value.trim();
     if (!name || !identifier) { alert('Contact Name and ID are required.'); return; }
-    if (!(identifier.startsWith('whatsapp:') || identifier.startsWith('client:'))) {
-        alert("Identifier must start with 'whatsapp:' or 'client:'."); return;
+    // Validate identifier: allow Twilio client identities (beginning with 'client:') or E.164 phone numbers.
+    const e164Regex = /^\+?[1-9]\d{1,14}$/;
+    if (identifier.startsWith('client:')) {
+        // OK: accepted as-is.
+    } else if (!e164Regex.test(identifier)) {
+        alert("Identifier must be a valid phone number in E.164 format (e.g., +1234567890) or start with 'client:'.");
+        return;
     }
     try {
         await callTwilioFunction('sync-contacts', 'POST', { name, identifier, team });
@@ -303,7 +357,7 @@ async function fetchActiveConversations() {
 }
 
 function applyFiltersAndRenderGroups() {
-    console.log(`Applying filters: Search='<span class="math-inline">\{groupSearchTerm\}', State\='</span>{groupFilterState}', OrderBy='<span class="math-inline">\{groupOrderBy\}', Dir\='</span>{groupOrderDirection}'`);
+    console.log(`Applying filters: Search='${groupSearchTerm}', State='${groupFilterState}', OrderBy='${groupOrderBy}', Dir='${groupOrderDirection}'`);
     let processedConversations = [...originalActiveConversations]; // Start with a copy
 
     // 1. Apply Search Filter (case-insensitive on friendlyName and description)
@@ -390,6 +444,7 @@ function renderGroups() {
                 <button class="secondary" onclick="openUpdateModal('${convData.sid}')">Update</button>
                 <button onclick="archiveGroup('${convData.sid}')">Archive</button>
                 <button onclick="deleteGroup('${convData.sid}')">Delete</button>
+                <button onclick="openInviteFlexModal('${convData.sid}', '${sanitizedGroupName}')">Invite Flex Agent</button>
             </div>`;
         groupsListEl.appendChild(li);
 
@@ -537,8 +592,18 @@ window.promptJoinConversation = async (conversationSid, twilioPhoneNumber, group
         console.log(`Group manager identity resolved: ${groupManagerIdentity}`);
 
         // Step 2: Await full SDK client instantiation (avoids race conditions)
-        groupManagerClient = await Twilio.Conversations.Client.create(tokenResponse.token);
+        groupManagerClient = new Twilio.Conversations.Client(tokenResponse.token);
+        // wait until the client is connected (prevents race conditions)
+        await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('SDK init timeout')), 10000);
+        const onState = (state) => {
+            if (state === 'connected') { clearTimeout(timeout); groupManagerClient.removeListener('connectionStateChanged', onState); resolve(); }
+            if (state === 'denied') { clearTimeout(timeout); groupManagerClient.removeListener('connectionStateChanged', onState); reject(new Error('Token denied')); }
+        };
+        groupManagerClient.on('connectionStateChanged', onState);
+        });
         console.log(`[GroupManager SDK] Ready as identity: ${groupManagerClient.user.identity}`);
+
 
         // Step 3: Proceed to open modal (join if needed inside)
         await openChatModalAsGroupManager(conversationSid, groupName);
@@ -556,18 +621,22 @@ async function openChatModalAsGroupManager(conversationSid, groupName) {
     if (!groupManagerClient) return alert("Group manager SDK not ready.");
     
     try {
-        const conversation = await groupManagerClient.getConversationBySid(conversationSid);
+        const conversation = await groupManagerClient.peekConversationBySid(conversationSid);
         console.log(`SDK resolved identity (via user object): ${groupManagerClient.user.identity}`);
 
+        // if Group Manager is not a participant yet, join now; otherwise carry on
+        try {
+        await conversation.getParticipantByIdentity(groupManagerIdentity);
+        // we are already a participant
+        } catch {
         try {
             await conversation.join();
         } catch (err) {
-            if (err?.message?.includes('already a participant')) {
-                console.log("Already joined as group manager.");
-            } else {
-                throw err;
-            }
+            // SDK/Server may race; ignore “already a participant” noise, rethrow anything else
+            if (!String(err?.message || '').includes('already a participant')) throw err;
         }
+        }
+
 
         const chatGroupNameEl = document.getElementById('chat-group-name-modal');
         const chatMessagesEl = document.getElementById('chat-messages');
@@ -639,6 +708,58 @@ window.deleteGroup = async (conversationSid) => {
         await fetchActiveConversations();
     } catch (error) { console.error('Failed to delete group:', error); }
 };
+
+window.openInviteFlexModal = async (conversationSid, groupName) => {
+  inviteFlexConversationSidInput.value = conversationSid;
+  inviteFlexGroupNameEl.textContent = `${groupName} (${conversationSid})`;
+
+  // Clear previous options
+  inviteWorkersSelect.innerHTML = '';
+  inviteQueueSelect.innerHTML = '';
+
+  // Prevent double-click while loading
+  sendFlexInvitesButton.disabled = true;
+
+  try {
+    const res = await callTwilioFunction('list-taskrouter-entities', 'GET');
+    if (!res || res.success === false) {
+      throw new Error(res?.message || 'Failed to load TaskRouter entities');
+    }
+
+    const workers = Array.isArray(res.workers) ? res.workers : [];
+    const queues  = Array.isArray(res.queues)  ? res.queues  : [];
+
+    // Populate workers (multi)
+    workers.forEach(w => {
+      const opt = document.createElement('option');
+      opt.value = w.sid;
+      opt.textContent = `${w.friendlyName} — ${w.sid}`;
+      inviteWorkersSelect.appendChild(opt);
+    });
+
+    // Populate queues (single)
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '— None —';
+    inviteQueueSelect.appendChild(noneOpt);
+
+    queues.forEach(q => {
+      const opt = document.createElement('option');
+      opt.value = q.sid;
+      opt.textContent = `${q.friendlyName} — ${q.sid}`;
+      inviteQueueSelect.appendChild(opt);
+    });
+
+    inviteFlexModal.style.display = 'block';
+    sendFlexInvitesButton.disabled = false;
+  } catch (e) {
+    console.error('Failed to load TaskRouter entities:', e);
+    alert('Could not load workers/queues. Check server logs.');
+    sendFlexInvitesButton.disabled = false;
+  }
+};
+
+
 
 // --- Modal Utilities ---
 window.closeModal = (modalId) => { document.getElementById(modalId).style.display = 'none'; };

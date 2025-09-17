@@ -36,13 +36,18 @@ exports.handler = async function(context, event, callback) {
     // --- End CORS ---
 
     // --- Environment Variable Checks ---
-    const { ACCOUNT_SID, AUTH_TOKEN, CONVERSATIONS_SERVICE_SID, WHATSAPP_TEMPLATE_SID } = context;
-    if (!ACCOUNT_SID || !AUTH_TOKEN || !CONVERSATIONS_SERVICE_SID || !WHATSAPP_TEMPLATE_SID) {
+    const E164 = /^\+?[1-9]\d{1,14}$/;
+    const plusify = s => s.startsWith('+') ? s : `+${s}`;
+    const toWa = s => s.startsWith('whatsapp:') ? s : `whatsapp:${plusify(s)}`;
+
+    const { ACCOUNT_SID, AUTH_TOKEN, CONVERSATIONS_SERVICE_SID, WHATSAPP_TEMPLATE_SID, TWILIO_FUNCTIONS_BASE_URL } = context;
+    if (!ACCOUNT_SID || !AUTH_TOKEN || !CONVERSATIONS_SERVICE_SID || !WHATSAPP_TEMPLATE_SID || !TWILIO_FUNCTIONS_BASE_URL) {
         let missing = [];
         if (!ACCOUNT_SID) missing.push("ACCOUNT_SID");
         if (!AUTH_TOKEN) missing.push("AUTH_TOKEN");
         if (!CONVERSATIONS_SERVICE_SID) missing.push("CONVERSATIONS_SERVICE_SID");
         if (!WHATSAPP_TEMPLATE_SID) missing.push("WHATSAPP_TEMPLATE_SID");
+        if (!TWILIO_FUNCTIONS_BASE_URL) missing.push("TWILIO_FUNCTIONS_BASE_URL");
         const errorMsg = `Server configuration error: Missing environment variable(s): ${missing.join(', ')}.`;
         console.error("[CONFIG ERROR /createGroupConversation]", errorMsg);
         response.setStatusCode(500);
@@ -77,44 +82,51 @@ exports.handler = async function(context, event, callback) {
             createdBy: "whatsapp_groups_manager" // Or pass actual initiator if available
         });
 
-        newConversation = await client.conversations.v1.conversations.create({
+        newConversation = await client.conversations.v1.services(CONVERSATIONS_SERVICE_SID).conversations.create({
             friendlyName: friendlyName,
             attributes: conversationAttributes,
             // xTwilioWebhookEnabled: true // If you plan to use webhooks for this conversation
         });
-        console.log(`[CONV /createGroupConversation] Conversation created. SID: ${newConversation.sid}`);
+        console.log(`[CONV /createGroupConversation] Conversation created. Service: ${CONVERSATIONS_SERVICE_SID} SID: ${newConversation.sid}`);
+
+        const twilioWa = toWa(twilioPhoneNumber);
 
         // Step 2: Add Participants
         const whatsAppParticipantsToNotify = [];
+
         for (const p of participants) {
-            if (!p.identifier) {
-                console.warn(`[PARTICIPANT /createGroupConversation] Participant missing identifier, skipping:`, p);
+            const raw = (p.identifier || '').trim();
+
+            if (!raw) {
+                console.warn('[PARTICIPANT] Missing identifier, skipping:', p);
                 continue;
             }
-            try {
-                if (p.identifier.startsWith('whatsapp:')) {
-                    console.log(`[PARTICIPANT /createGroupConversation] Adding WhatsApp participant: ${p.identifier} to ${newConversation.sid} via proxy ${twilioPhoneNumber}`);
-                    await client.conversations.v1.conversations(newConversation.sid)
-                        .participants
-                        .create({
-                            'messagingBinding.address': p.identifier,
-                            'messagingBinding.proxyAddress': twilioPhoneNumber
-                        });
-                    whatsAppParticipantsToNotify.push(p.identifier);
-                } else if (p.identifier.startsWith('client:')) {
-                    const chatIdentity = p.identifier.substring('client:'.length);
-                    console.log(`[PARTICIPANT /createGroupConversation] Adding Chat participant: ${chatIdentity} to ${newConversation.sid}`);
-                    await client.conversations.v1.conversations(newConversation.sid)
-                        .participants
-                        .create({ identity: chatIdentity });
-                } else {
-                    console.warn(`[PARTICIPANT /createGroupConversation] Unknown participant identifier type, skipping: ${p.identifier}`);
-                }
-            } catch (participantError) {
-                console.error(`[PARTICIPANT ERROR /createGroupConversation] Failed to add participant ${p.identifier} to ${newConversation.sid}:`, participantError);
-                // Decide if you want to continue adding others or fail the whole process
+
+            if (raw.startsWith('client:')) {
+                const chatIdentity = raw.slice('client:'.length);
+                console.log(`[PARTICIPANT] Adding Chat participant: ${chatIdentity}`);
+                await client.conversations.v1.services(CONVERSATIONS_SERVICE_SID).conversations(newConversation.sid)
+                .participants.create({ identity: chatIdentity });
+                continue;
             }
+
+            // Treat anything else as a phone number (bare +E164 or already whatsapp:+)
+            if (!E164.test(raw) && !raw.startsWith('whatsapp:')) {
+                console.warn(`[PARTICIPANT] Invalid phone format, skipping: ${raw}`);
+                continue;
+            }
+            const waAddr = toWa(raw);
+
+            console.log(`[PARTICIPANT] Adding WhatsApp participant: ${waAddr} via proxy ${twilioWa}`);
+            await client.conversations.v1.services(CONVERSATIONS_SERVICE_SID).conversations(newConversation.sid)
+                .participants.create({
+                'messagingBinding.address': waAddr,
+                'messagingBinding.proxyAddress': twilioWa
+                });
+
+            whatsAppParticipantsToNotify.push(waAddr);
         }
+
         console.log(`[PARTICIPANT /createGroupConversation] Finished adding participants. ${whatsAppParticipantsToNotify.length} WhatsApp participants to notify.`);
 
         // Step 3: Send WhatsApp Template Message to WhatsApp Participants
@@ -134,7 +146,7 @@ exports.handler = async function(context, event, callback) {
                     await client.messages.create({
                         contentSid: WHATSAPP_TEMPLATE_SID,
                         // contentVariables: contentVariables, // Uncomment and adjust if your template uses variables
-                        from: twilioPhoneNumber, // This must be a WhatsApp-enabled Twilio number
+                        from: twilioWa, // This must be a WhatsApp-enabled Twilio number
                         to: waIdentifier
                     });
                     console.log(`[WHATSAPP /createGroupConversation] Template message sent to ${waIdentifier}`);
