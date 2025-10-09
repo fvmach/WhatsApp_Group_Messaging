@@ -11,93 +11,7 @@ let groupOrderBy = 'dateUpdated'; // Default order: by last updated
 let groupOrderDirection = 'desc';   // Default direction: descending
 let activeIdentity = null;
 
-// React state references (will be set by React components)
-let reactStateUpdaters = {
-    setContacts: null,
-    setGroups: null,
-    setSdkStatus: null,
-    setIsInitialized: null
-};
-
-// --- Bridge functions for React integration ---
-window.initializeSDKFromPaste = async function(identity) {
-    try {
-        // Always resolve to whatsapp_groups_manager unless another identity is explicitly provided
-        const tokenResponse = await callTwilioFunction('initialize-twilio-sdk', 'POST', {
-            identity: identity || 'whatsapp_groups_manager'
-        });
-
-        activeIdentity = tokenResponse.identity;
-        conversationsClient = new Twilio.Conversations.Client(tokenResponse.token);
-
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('SDK initialization timeout')), 10000);
-            
-            conversationsClient.on('connectionStateChanged', (state) => {
-                if (state === 'connected') {
-                    clearTimeout(timeout);
-                    console.log('Conversations Client Connected as global identity:', activeIdentity);
-                    
-                    // Setup event listeners
-                    conversationsClient.on('conversationJoined', fetchActiveConversations);
-                    conversationsClient.on('conversationLeft', fetchActiveConversations);
-                    conversationsClient.on('conversationUpdated', ({ conversation, updateReasons }) => {
-                        if (['friendlyName', 'attributes', 'state'].some(reason => updateReasons.includes(reason))) {
-                            fetchActiveConversations();
-                        }
-                    });
-
-                    conversationsClient.on('messageAdded', (message) => {
-                        console.log(`[MSG][${message.conversation.sid}] ${message.author}: ${message.body}`);
-                    });
-
-                    loadInitialData();
-                    resolve();
-                } else if (state === 'disconnected' || state === 'denied') {
-                    clearTimeout(timeout);
-                    reject(new Error(`Conversations Client ${state}`));
-                }
-            });
-        });
-    } catch (error) {
-        console.error('SDK Initialization error:', error);
-        throw error;
-    }
-};
-
-window.addContactFromPaste = async function(name, identifier, team) {
-    try {
-        await callTwilioFunction('sync-contacts', 'POST', { name, identifier, team });
-        await fetchContacts();
-    } catch (error) {
-        console.error('Failed to add contact:', error);
-        throw error;
-    }
-};
-
-window.createGroupFromPaste = async function(friendlyName, description, twilioPhoneNumber, selectedParticipants) {
-    try {
-        const participants = selectedParticipants.map(id => {
-            const contact = userContacts.find(c => c.data && c.data.identifier === id);
-            return { 
-                identifier: id, 
-                name: contact ? contact.data.name : id 
-            };
-        });
-
-        await callTwilioFunction('createGroupConversation', 'POST', { 
-            friendlyName, 
-            description, 
-            participants, 
-            twilioPhoneNumber 
-        });
-        
-        await fetchActiveConversations();
-    } catch (error) {
-        console.error('Failed to create group:', error);
-        throw error;
-    }
-};
+// --- DOM-based event handling for simplified HTML approach ---
 
 // --- API Helper ---
 async function callTwilioFunction(endpoint, method = 'POST', body = {}) {
@@ -391,26 +305,7 @@ function renderGroups() {
     });
 }
 
-// Filter event handlers for the React components
-window.updateSearchTerm = function(term) {
-    groupSearchTerm = term;
-    applyFiltersAndRenderGroups();
-};
-
-window.updateFilterState = function(state) {
-    groupFilterState = state;
-    applyFiltersAndRenderGroups();
-};
-
-window.updateOrderBy = function(orderBy) {
-    groupOrderBy = orderBy;
-    applyFiltersAndRenderGroups();
-};
-
-window.updateOrderDirection = function(direction) {
-    groupOrderDirection = direction;
-    applyFiltersAndRenderGroups();
-};
+// Filter functions are now handled by direct DOM event listeners in setupGroupListEventListeners
 
 // All the remaining original functions...
 window.openUpdateModal = async (conversationSid) => {
@@ -473,6 +368,148 @@ window.openUpdateModal = async (conversationSid) => {
 
 // Event listeners for form submissions
 document.addEventListener('DOMContentLoaded', function() {
+    // Initialize SDK button
+    const initializeSdkButton = document.getElementById('initialize-sdk-button');
+    if (initializeSdkButton) {
+        initializeSdkButton.addEventListener('click', async () => {
+            const clientProvidedIdentity = document.getElementById('token-identity').value.trim();
+            const sdkStatusEl = document.getElementById('sdk-status');
+            sdkStatusEl.textContent = 'SDK Status: Initializing...';
+            try {
+                // Always resolve to whatsapp_groups_manager unless another identity is explicitly provided
+                const tokenResponse = await callTwilioFunction('initialize-twilio-sdk', 'POST', {
+                    identity: clientProvidedIdentity || 'whatsapp_groups_manager'
+                });
+
+                activeIdentity = tokenResponse.identity;
+                conversationsClient = new Twilio.Conversations.Client(tokenResponse.token);
+
+                conversationsClient.on('connectionStateChanged', (state) => {
+                    sdkStatusEl.textContent = `SDK Status: ${state}`;
+                    if (state === 'connected') {
+                        console.log('Conversations Client Connected as global identity:', activeIdentity);
+
+                        document.getElementById('init-section').classList.add('hidden');
+                        document.getElementById('contacts-section').classList.remove('hidden');
+                        document.getElementById('groups-section').classList.remove('hidden');
+
+                        setupGroupListEventListeners();
+                        loadInitialData();
+                    } else if (state === 'disconnected' || state === 'denied') {
+                        console.error('Conversations Client disconnected or token denied. State:', state);
+                    }
+                });
+
+                conversationsClient.on('conversationJoined', fetchActiveConversations);
+                conversationsClient.on('conversationLeft', fetchActiveConversations);
+                conversationsClient.on('conversationUpdated', ({ conversation, updateReasons }) => {
+                    if (['friendlyName', 'attributes', 'state'].some(reason => updateReasons.includes(reason))) {
+                        fetchActiveConversations();
+                    }
+                });
+
+                conversationsClient.on('messageAdded', (message) => {
+                    console.log(`[MSG][${message.conversation.sid}] ${message.author}: ${message.body}`);
+                });
+
+            } catch (error) {
+                sdkStatusEl.textContent = `SDK Status: Error - ${error.message}`;
+                console.error('SDK Initialization error:', error);
+            }
+        });
+    }
+
+    // Add contact button
+    const addContactButton = document.getElementById('add-contact-button');
+    if (addContactButton) {
+        addContactButton.addEventListener('click', async () => {
+            const name = document.getElementById('contact-name').value.trim();
+            const identifier = document.getElementById('contact-id').value.trim();
+            const team = document.getElementById('contact-team').value.trim();
+            if (!name || !identifier) { alert('Contact Name and ID are required.'); return; }
+            // Validate identifier: allow Twilio client identities (beginning with 'client:') or E.164 phone numbers.
+            const e164Regex = /^\+?[1-9]\d{1,14}$/;
+            if (identifier.startsWith('client:')) {
+                // OK: accepted as-is.
+            } else if (!e164Regex.test(identifier)) {
+                alert("Identifier must be a valid phone number in E.164 format (e.g., +1234567890) or start with 'client:'.");
+                return;
+            }
+            try {
+                await callTwilioFunction('sync-contacts', 'POST', { name, identifier, team });
+                document.getElementById('contact-name').value = '';
+                document.getElementById('contact-id').value = '';
+                document.getElementById('contact-team').value = '';
+                await fetchContacts();
+            } catch (error) { console.error('Failed to add contact:', error); }
+        });
+    }
+
+    // Create group button
+    const createGroupButton = document.getElementById('create-group-button');
+    if (createGroupButton) {
+        createGroupButton.addEventListener('click', async () => {
+            console.log("Create Group button clicked.");
+            const friendlyName = document.getElementById('group-name').value.trim();
+            const description = document.getElementById('group-description').value.trim();
+            const twilioPhoneNumber = document.getElementById('group-twilio-number').value.trim();
+            const participants = Array.from(document.getElementById('group-participants-select').querySelectorAll('input:checked'))
+                .map(cb => ({ identifier: cb.value, name: cb.dataset.name }));
+            if (!friendlyName) { alert('Group Name is required.'); return; }
+            if (participants.length === 0) { alert('Select at least one participant.'); return; }
+            if (!twilioPhoneNumber) { alert('Twilio Phone Number is required.'); return; }
+
+            console.log("Attempting to call /createGroupConversation function...");
+            try {
+                const createGroupResult = await callTwilioFunction('createGroupConversation', 'POST', { friendlyName, description, participants, twilioPhoneNumber });
+                console.log("Group creation function call successful (client-side). Result:", createGroupResult);
+
+                document.getElementById('group-name').value = '';
+                document.getElementById('group-description').value = '';
+                document.getElementById('group-twilio-number').value = '';
+                document.getElementById('group-participants-select').querySelectorAll('input:checked').forEach(cb => cb.checked = false);
+
+                console.log("Calling fetchActiveConversations after group creation...");
+                await fetchActiveConversations();
+                console.log("fetchActiveConversations completed after group creation.");
+            } catch (error) {
+                console.error('Failed to create group (in createGroupButton listener):', error);
+                // Alert is already handled by callTwilioFunction
+            }
+        });
+    }
+
+    function setupGroupListEventListeners() {
+        const searchGroupsInput = document.getElementById('search-groups-input');
+        const filterGroupStateSelect = document.getElementById('filter-group-state-select');
+        const orderGroupsBySelect = document.getElementById('order-groups-by-select');
+        const orderGroupsDirectionSelect = document.getElementById('order-groups-direction-select');
+        
+        if (searchGroupsInput) {
+            searchGroupsInput.addEventListener('input', (e) => {
+                groupSearchTerm = e.target.value;
+                applyFiltersAndRenderGroups();
+            });
+        }
+        if (filterGroupStateSelect) {
+            filterGroupStateSelect.addEventListener('change', (e) => {
+                groupFilterState = e.target.value;
+                applyFiltersAndRenderGroups();
+            });
+        }
+        if (orderGroupsBySelect) {
+            orderGroupsBySelect.addEventListener('change', (e) => {
+                groupOrderBy = e.target.value;
+                applyFiltersAndRenderGroups();
+            });
+        }
+        if (orderGroupsDirectionSelect) {
+            orderGroupsDirectionSelect.addEventListener('change', (e) => {
+                groupOrderDirection = e.target.value;
+                applyFiltersAndRenderGroups();
+            });
+        }
+    }
     // Notify message button
     const sendNotifyMessageButton = document.getElementById('send-notify-message-button');
     if (sendNotifyMessageButton) {
