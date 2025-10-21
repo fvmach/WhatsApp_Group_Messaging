@@ -18,7 +18,7 @@ exports.handler = function(context, event, callback) {
     console.log('[CORS DEBUG] Request Origin Header:', requestOrigin);
     console.log('[CORS DEBUG] Environment ALLOWED_ORIGINS:', context.ALLOWED_ORIGINS);
 
-    const configuredAllowedOrigins = (context.ALLOWED_ORIGINS || "").split(',');
+    const configuredAllowedOrigins = (context.ALLOWED_ORIGINS || "").split(',').map(origin => origin.trim().toLowerCase());
     console.log('[CORS DEBUG] Parsed configuredAllowedOrigins:', configuredAllowedOrigins);
     let effectiveAllowOriginHeader = null;
     if (configuredAllowedOrigins.includes('*')) {

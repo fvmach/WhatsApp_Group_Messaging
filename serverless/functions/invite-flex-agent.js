@@ -3,19 +3,25 @@ exports.handler = async function (context, event, callback) {
   const response = new Twilio.Response();
 
   // --- CORS Headers ---
-  const requestOrigin =
-    event.headers?.origin || event.request?.headers?.origin || '';
-  const allowedOrigins = ['http://localhost:3000', 'http://localhost:8000', 'https://flex.twilio.com'];
-  const allowOrigin = allowedOrigins.includes(requestOrigin) ? requestOrigin : null;
+  const requestOrigin = event.request?.headers?.origin || event.headers?.origin || '';
+  console.log(`[CORS DEBUG /invite-flex-agent] Function execution started. Request Origin: ${requestOrigin}`);
+  
+  const allowedOrigins = context.ALLOWED_ORIGINS ? 
+    context.ALLOWED_ORIGINS.split(',').map(origin => origin.trim()) : 
+    ['http://localhost:3000', 'http://localhost:8000', 'https://flex.twilio.com'];
+  
+  const allowOrigin = allowedOrigins.includes('*') || allowedOrigins.includes(requestOrigin) ? 
+    (allowedOrigins.includes('*') ? '*' : requestOrigin) : null;
 
-  if (!allowOrigin) {
+  if (!allowOrigin && requestOrigin) {
+    console.log(`[CORS DEBUG /invite-flex-agent] Origin ${requestOrigin} not in allowed list: ${allowedOrigins.join(', ')}`);
     response.appendHeader('Content-Type', 'application/json');
     response.setStatusCode(403);
     response.setBody({ error: 'Origin not allowed' });
     return callback(null, response);
   }
 
-  response.appendHeader('Access-Control-Allow-Origin', allowOrigin);
+  response.appendHeader('Access-Control-Allow-Origin', allowOrigin || '*');
   response.appendHeader('Access-Control-Allow-Methods', 'OPTIONS, POST');
   response.appendHeader('Access-Control-Allow-Headers', 'Content-Type');
   response.appendHeader('Access-Control-Allow-Credentials', 'true');
@@ -30,151 +36,268 @@ exports.handler = async function (context, event, callback) {
   }
 
   try {
-    // Accept JSON body (Runtime V2 passes parsed fields on event for JSON)
-    let payload = {};
-    try { payload = typeof event.body === 'string' ? JSON.parse(event.body) : (event || {}); } catch {}
-    const { conversationSid, queueSid, workerSid, inviteAttributes = {} } = payload;
+    console.log('[invite-flex-agent] RAW event:', JSON.stringify({
+      request: typeof event.request,
+      conversationSid: event.conversationSid,
+      workerSid: event.workerSid,
+      queueSid: event.queueSid,
+      inviteAttributes: typeof event.inviteAttributes
+    }));
 
-    console.log('[invite-flex-agent] Payload received:', {
-      conversationSid,
-      queueSid: queueSid || 'none',
-      workerSid: workerSid || 'none'
+    // Environment validation
+    const requiredVars = ['TASKROUTER_WORKSPACE_SID', 'TASKROUTER_WORKFLOW_SID'];
+    const missingVars = requiredVars.filter(varName => !context[varName]);
+    if (missingVars.length > 0) {
+      console.log('[invite-flex-agent] Missing environment variables:', missingVars);
+      response.setStatusCode(500);
+      response.setBody({ success: false, error: `Missing environment variables: ${missingVars.join(', ')}` });
+      return callback(null, response);
+    }
+    
+    console.log('[invite-flex-agent] Env check:', {
+      TASKROUTER_WORKSPACE_SID: context.TASKROUTER_WORKSPACE_SID,
+      TASKROUTER_WORKFLOW_SID: context.TASKROUTER_WORKFLOW_SID
     });
+
+    // Parse request body
+    let body = {};
+    if (typeof event.body === 'string') {
+      try {
+        body = JSON.parse(event.body);
+      } catch (parseError) {
+        console.log('[invite-flex-agent] JSON parse error:', parseError.message);
+      }
+    } else {
+      body = event;
+    }
+    
+    console.log('[invite-flex-agent] Parsed body:', JSON.stringify({
+      request: typeof body.request,
+      conversationSid: body.conversationSid,
+      workerSid: body.workerSid,
+      queueSid: body.queueSid,
+      inviteAttributes: typeof body.inviteAttributes
+    }));
+
+    const { conversationSid, queueSid, workerSid, inviteAttributes = {} } = body;
 
     if (!conversationSid) {
       response.setStatusCode(400);
-      response.setBody({ error: 'Missing conversationSid' });
+      response.setBody({ success: false, error: 'Missing conversationSid' });
       return callback(null, response);
     }
 
-    // Create Interaction linked to existing Conversation - using the correct singular API
-    console.log('[invite-flex-agent] Creating interaction...');
-    
-    // Build routing properties carefully - don't include null/undefined values
-    const routingProperties = {
-      workspace_sid: context.TASKROUTER_WORKSPACE_SID,
-      task_channel_unique_name: 'chat',
-      attributes: JSON.stringify({
-        conversationSid,
-        from: conversationSid, // Use conversationSid as the from identifier
-        ...inviteAttributes
-      })
-    };
-    
-    // Add workflow_sid if available (typically required for TaskRouter operations)
-    if (context.TASKROUTER_WORKFLOW_SID) {
-      routingProperties.workflow_sid = context.TASKROUTER_WORKFLOW_SID;
-    }
-
-    // Only add worker_sid OR queue_sid, not both at the same time
-    if (workerSid && workerSid !== 'none') {
-      routingProperties.worker_sid = workerSid;
-    } else if (queueSid && queueSid !== 'none') {
-      routingProperties.queue_sid = queueSid;
-    }
-
-    console.log('[invite-flex-agent] Routing properties:', JSON.stringify(routingProperties, null, 2));
-
-    const interaction = await client.flexApi.v1.interaction.create({
-      channel: {
-        type: 'whatsapp',
-        initiated_by: 'customer',
-        properties: { media_channel_sid: conversationSid },
-      },
-      routing: {
-        properties: {
-          workspace_sid: context.TASKROUTER_WORKSPACE_SID,
-          task_channel_unique_name: 'chat',
-          ...(context.TASKROUTER_WORKFLOW_SID ? { workflow_sid: context.TASKROUTER_WORKFLOW_SID } : {}),
-          ...(queueSid && queueSid !== 'none' ? { queue_sid: queueSid } : {}),
-          ...(workerSid && workerSid !== 'none' ? { worker_sid: workerSid } : {}),
-          attributes: {
-            conversationSid,
-            ...inviteAttributes
-          },
-        },
-      },
-    });
-
-    console.log('[invite-flex-agent] Interaction created:', interaction.sid);
-
-    // Optional explicit Invite (queue or worker) to generate a routed task
-    if ((queueSid && queueSid !== 'none') || (workerSid && workerSid !== 'none')) {
-      console.log('[invite-flex-agent] Creating explicit invite...');
-      
-      const inviteRoutingProperties = {
-        workspace_sid: context.TASKROUTER_WORKSPACE_SID,
-        task_channel_unique_name: 'chat',
-        attributes: JSON.stringify({
-          conversationSid,
-          ...inviteAttributes
-        })
-      };
-      
-      // Add workflow_sid if available
-      if (context.TASKROUTER_WORKFLOW_SID) {
-        inviteRoutingProperties.workflow_sid = context.TASKROUTER_WORKFLOW_SID;
-      }
-
-      // Only add worker_sid OR queue_sid for invite
-      if (workerSid && workerSid !== 'none') {
-        inviteRoutingProperties.worker_sid = workerSid;
-      } else if (queueSid && queueSid !== 'none') {
-        inviteRoutingProperties.queue_sid = queueSid;
-      }
-
-      await client.flexApi.v1
-        .interaction(interaction.sid)
-        .channels(interaction.channel.sid)
-        .invites.create({
-          routing: {
-            properties: inviteRoutingProperties,
-          },
-        });
-      console.log('[invite-flex-agent] Explicit invite created successfully');
-    }
-
-    // Update conversation attributes to track the interaction
+    // Check if interaction already exists for this conversation
+    let existingInteractionSid = null;
     try {
       const conv = await client.conversations.v1.conversations(conversationSid).fetch();
-      let attrs = {};
-      try { 
-        attrs = conv.attributes ? JSON.parse(conv.attributes) : {}; 
-      } catch { 
-        attrs = {}; 
-      }
-
-      const updatedAttrs = {
-        ...attrs,
-        flexInteraction: {
-          sid: interaction.sid,
-          channelSid: interaction.channel?.sid,
-          createdAt: new Date().toISOString()
+      if (conv.attributes) {
+        const attrs = JSON.parse(conv.attributes);
+        if (attrs.flexInteraction?.sid) {
+          existingInteractionSid = attrs.flexInteraction.sid;
+          console.log('[invite-flex-agent] Found existing interaction:', existingInteractionSid);
         }
-      };
-
-      await client.conversations.v1.conversations(conversationSid)
-        .update({ attributes: JSON.stringify(updatedAttrs) });
-
-      console.log('[invite-flex-agent] Conversation attributes updated');
-    } catch (attrError) {
-      console.log('[invite-flex-agent] Warning: Could not update conversation attributes:', attrError.message);
-      // Don't fail the whole operation if attribute update fails
+      }
+    } catch (fetchError) {
+      console.log('[invite-flex-agent] Warning: Could not fetch conversation:', fetchError.message);
     }
 
-    response.setStatusCode(201);
-    response.setBody({ 
+    let interactionSid = existingInteractionSid;
+    
+    // Create new interaction if none exists
+    if (!existingInteractionSid) {
+      console.log('[invite-flex-agent] Creating Interaction with routing:', {
+        conversationSid,
+        reason: 'Direct agent invite from group',
+        known_worker: workerSid || 'none',
+        known_queue: queueSid || 'none'
+      });
+
+      // Build task attributes with conversation context
+      const taskAttributes = {
+        conversationSid,
+        from: 'whatsapp:group',
+        name: 'WhatsApp Group Customer',
+        channelType: 'whatsapp',
+        direction: 'inbound',
+        initiated_by: 'customer',
+        ...inviteAttributes
+      };
+
+      const interaction = await client.flexApi.v1.interaction.create({
+        channel: {
+          type: 'whatsapp', // Interaction channel type should be whatsapp
+          initiated_by: 'customer',
+          properties: {
+            media_channel_sid: conversationSid
+          }
+        },
+        routing: {
+          properties: {
+            workspace_sid: context.TASKROUTER_WORKSPACE_SID,
+            workflow_sid: context.TASKROUTER_WORKFLOW_SID,
+            task_channel_unique_name: 'chat',
+            ...(queueSid && queueSid !== 'none' ? { queue_sid: queueSid } : {}),
+            ...(workerSid && workerSid !== 'none' ? { worker_sid: workerSid } : {}),
+            attributes: taskAttributes
+          }
+        }
+      });
+
+      interactionSid = interaction.sid;
+      console.log('[invite-flex-agent] Interaction created', interactionSid);
+
+      // Wait for channel to be created and get channel SID
+      let channelSid = null;
+      let attempts = 0;
+      while (!channelSid && attempts < 5) {
+        attempts++;
+        try {
+          const interactionDetails = await client.flexApi.v1.interaction(interactionSid).fetch();
+          if (interactionDetails.channel && interactionDetails.channel.sid) {
+            channelSid = interactionDetails.channel.sid;
+            console.log('[invite-flex-agent] Channel found:', channelSid);
+            break;
+          }
+          console.log(`[invite-flex-agent] Channel poll attempt ${attempts}: waiting...`);
+          await new Promise(resolve => setTimeout(resolve, 200));
+        } catch (pollError) {
+          console.log(`[invite-flex-agent] Channel poll attempt ${attempts} error:`, pollError.message);
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      }
+
+      if (!channelSid) {
+        console.log('[invite-flex-agent] Channel not ready after retries');
+        // Don't fail - continue with invite creation
+      }
+
+      // Create invite for specific worker or queue
+      if ((queueSid && queueSid !== 'none') || (workerSid && workerSid !== 'none')) {
+        try {
+          const inviteRoutingProperties = {
+            workspace_sid: context.TASKROUTER_WORKSPACE_SID,
+            workflow_sid: context.TASKROUTER_WORKFLOW_SID,
+            task_channel_unique_name: 'chat',
+            attributes: taskAttributes
+          };
+          
+          if (workerSid && workerSid !== 'none') {
+            inviteRoutingProperties.worker_sid = workerSid;
+          } else if (queueSid && queueSid !== 'none') {
+            inviteRoutingProperties.queue_sid = queueSid;
+          }
+
+          if (channelSid) {
+            await client.flexApi.v1
+              .interaction(interactionSid)
+              .channels(channelSid)
+              .invites.create({
+                routing: {
+                  properties: inviteRoutingProperties
+                }
+              });
+            console.log('[invite-flex-agent] Invite created successfully');
+          } else {
+            console.log('[invite-flex-agent] Skipping invite creation - no channel SID available');
+          }
+        } catch (inviteError) {
+          console.log('[invite-flex-agent] Warning: Could not create invite:', inviteError.message);
+          // Don't fail the whole operation
+        }
+      }
+
+      // Update conversation attributes with interaction details
+      try {
+        const conv = await client.conversations.v1.conversations(conversationSid).fetch();
+        let attrs = {};
+        try {
+          attrs = conv.attributes ? JSON.parse(conv.attributes) : {};
+        } catch {
+          attrs = {};
+        }
+
+        const updatedAttrs = {
+          ...attrs,
+          flexInteraction: {
+            sid: interactionSid,
+            channelSid: channelSid,
+            createdAt: new Date().toISOString()
+          }
+        };
+
+        await client.conversations.v1.conversations(conversationSid)
+          .update({ attributes: JSON.stringify(updatedAttrs) });
+
+        console.log('[invite-flex-agent] Conversation attributes updated with interaction details');
+      } catch (attrError) {
+        console.log('[invite-flex-agent] Warning: Could not update conversation attributes:', attrError.message);
+      }
+    } else {
+      // Use existing interaction for additional invites
+      console.log('[invite-flex-agent] Using existing interaction:', existingInteractionSid);
+      
+      if ((queueSid && queueSid !== 'none') || (workerSid && workerSid !== 'none')) {
+        try {
+          // Get the existing interaction to find the channel SID
+          const interactionDetails = await client.flexApi.v1.interaction(existingInteractionSid).fetch();
+          const channelSid = interactionDetails.channel?.sid;
+          
+          if (channelSid) {
+            const taskAttributes = {
+              conversationSid,
+              from: 'whatsapp:group',
+              name: 'WhatsApp Group Customer',
+              channelType: 'whatsapp',
+              direction: 'inbound',
+              initiated_by: 'customer',
+              ...inviteAttributes
+            };
+            
+            const inviteRoutingProperties = {
+              workspace_sid: context.TASKROUTER_WORKSPACE_SID,
+              workflow_sid: context.TASKROUTER_WORKFLOW_SID,
+              task_channel_unique_name: 'chat',
+              attributes: taskAttributes
+            };
+            
+            if (workerSid && workerSid !== 'none') {
+              inviteRoutingProperties.worker_sid = workerSid;
+            } else if (queueSid && queueSid !== 'none') {
+              inviteRoutingProperties.queue_sid = queueSid;
+            }
+
+            await client.flexApi.v1
+              .interaction(existingInteractionSid)
+              .channels(channelSid)
+              .invites.create({
+                routing: {
+                  properties: inviteRoutingProperties
+                }
+              });
+            console.log('[invite-flex-agent] Additional invite created for existing interaction');
+          }
+        } catch (inviteError) {
+          console.log('[invite-flex-agent] Warning: Could not create additional invite:', inviteError.message);
+        }
+      }
+    }
+
+    response.setStatusCode(200);
+    response.setBody({
       success: true,
-      interactionSid: interaction.sid,
-      message: 'Flex agent invitation sent successfully'
+      interactionSid: interactionSid,
+      message: 'Flex agent invitation processed successfully'
     });
     return callback(null, response);
+    
   } catch (err) {
     console.error('[invite-flex-agent] Error:', err);
     response.setStatusCode(500);
-    response.setBody({ 
+    response.setBody({
       success: false,
-      error: err.message 
+      message: 'Failed to invite Flex agent',
+      detail: err.message
     });
     return callback(null, response);
   }
