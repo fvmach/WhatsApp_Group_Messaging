@@ -80,6 +80,18 @@ twilio serverless:deploy
 
 Note the base URL output from the deployment (e.g., `https://your-domain.twil.io`).
 
+### Configure Frontend Base URL
+
+**IMPORTANT**: After deploying, you must update the `FUNCTION_BASE_URL` constant in `src/app.js`:
+
+```javascript
+const FUNCTION_BASE_URL = 'https://your-deployed-domain.twil.io';
+```
+
+Replace `'https://your-deployed-domain.twil.io'` with the actual URL from your deployment output.
+
+**This step is required** - the frontend will not work without this configuration.
+
 ## Running the Frontend
 
 You can serve the frontend locally using any static server:

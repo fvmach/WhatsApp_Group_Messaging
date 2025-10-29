@@ -61,6 +61,12 @@ cd serverless
 twilio serverless:deploy
 ```
 
+**CRITICAL**: After deployment, you MUST update the `FUNCTION_BASE_URL` in `src/app.js`:
+```javascript
+const FUNCTION_BASE_URL = 'https://your-deployed-domain.twil.io';
+```
+Replace with your actual deployment URL. The application will not work without this step.
+
 #### Serve Frontend Locally
 ```bash
 # Option 1: Using serve
@@ -173,6 +179,7 @@ curl -X POST https://your-domain.twil.io/function-name \
 ```
 
 ### Common Debug Points
+- **FUNCTION_BASE_URL not configured**: Most common issue! Verify `FUNCTION_BASE_URL` in `src/app.js` matches your deployed Functions domain
 - **CORS Issues**: Check `ALLOWED_ORIGINS` environment variable
 - **Token Issues**: Verify API Key SID/Secret in environment
 - **Sync Issues**: Ensure Sync Service SID is correct
