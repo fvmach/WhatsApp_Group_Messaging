@@ -1,208 +1,143 @@
 exports.handler = async function(context, event, callback) {
-  // --- CORS Configuration ---
+  // --- CORS ---
   const response = new Twilio.Response();
-  const requestOrigin = event.headers && (event.headers.origin || event.headers.Origin);
-  console.log(`[CORS DEBUG /createGroupConversation] Function execution started. Request Origin: ${requestOrigin}`);
-  console.log(`[CORS DEBUG /createGroupConversation] Environment ALLOWED_ORIGINS: ${context.ALLOWED_ORIGINS}`);
-
-  const configuredAllowedOrigins = (context.ALLOWED_ORIGINS || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean);
-
-  let effectiveAllowOriginHeader = null;
-  if (configuredAllowedOrigins.includes("*")) {
-    effectiveAllowOriginHeader = "*";
-  } else if (requestOrigin) {
-    const lowerSet = new Set(configuredAllowedOrigins.map(o => o.toLowerCase()));
-    if (lowerSet.has(String(requestOrigin).toLowerCase())) {
-      effectiveAllowOriginHeader = requestOrigin;
-    }
-  }
-  if (effectiveAllowOriginHeader) {
-    response.appendHeader("Access-Control-Allow-Origin", effectiveAllowOriginHeader);
-  }
+  const origin = event.headers && (event.headers.origin || event.headers.Origin);
+  const allowed = (context.ALLOWED_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
+  let allow = null;
+  if (allowed.includes("*")) allow = "*";
+  else if (origin && allowed.map(x => x.toLowerCase()).includes(String(origin).toLowerCase())) allow = origin;
+  if (allow) response.appendHeader("Access-Control-Allow-Origin", allow);
   response.appendHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   response.appendHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   response.appendHeader("Access-Control-Allow-Credentials", "true");
-
-  // Derive httpMethod for OPTIONS check
-  let httpMethod = event.httpMethod || (event.request && (event.request.method || event.request.httpMethod));
-  console.log(`[REQUEST /createGroupConversation] Derived httpMethod for OPTIONS check: ${httpMethod}`);
-  if (String(httpMethod).toUpperCase() === "OPTIONS") {
-    console.log("[REQUEST /createGroupConversation] Handling OPTIONS preflight request.");
-    response.setStatusCode(204);
-    return callback(null, response);
-  }
+  const httpMethod = event.httpMethod || (event.request && (event.request.method || event.request.httpMethod));
+  if (String(httpMethod).toUpperCase() === "OPTIONS") { response.setStatusCode(204); return callback(null, response); }
   response.appendHeader("Content-Type", "application/json");
-  // --- End CORS ---
 
-  // --- Always-WhatsApp helpers ---
+  // --- Helpers: accept whatsapp:+E164 or +E164, ALWAYS emit whatsapp:+E164 ---
   const E164 = /^\+[1-9]\d{1,14}$/;
   const stripWa = s => String(s || "").trim().replace(/^whatsapp:/i, "");
-  const digitsPlus = s => String(s || "").replace(/[^\d+]/g, "");
-  const normalizeE164 = (input) => {
-    // Remove whatsapp:, spaces, punctuation
-    let raw = digitsPlus(stripWa(input));
-    if (!raw) return "";
+  const toE164OrNull = input => { const v = stripWa(input); return E164.test(v) ? v : null; };
+  const toWa = e164 => `whatsapp:${e164}`;
 
-    // Convert 00-prefix international to + (e.g., 0044... -> +44...)
-    if (raw.startsWith("00")) raw = `+${raw.slice(2)}`;
-
-    // Add + if looks like an international number (8–15 digits)
-    if (!raw.startsWith("+") && /^\d{8,15}$/.test(raw)) raw = `+${raw}`;
-
-    // Final sanity: must be valid E.164
-    if (!E164.test(raw)) return "";
-    return raw;
-  };
-  const asWa = (input) => {
-    const e = normalizeE164(input);
-    return e ? `whatsapp:${e}` : "";
-  };
-
-  const { ACCOUNT_SID, AUTH_TOKEN, CONVERSATIONS_SERVICE_SID, WHATSAPP_TEMPLATE_SID, TWILIO_FUNCTIONS_BASE_URL } = context;
-  if (!ACCOUNT_SID || !AUTH_TOKEN || !CONVERSATIONS_SERVICE_SID || !WHATSAPP_TEMPLATE_SID || !TWILIO_FUNCTIONS_BASE_URL) {
-    let missing = [];
-    if (!ACCOUNT_SID) missing.push("ACCOUNT_SID");
-    if (!AUTH_TOKEN) missing.push("AUTH_TOKEN");
-    if (!CONVERSATIONS_SERVICE_SID) missing.push("CONVERSATIONS_SERVICE_SID");
-    if (!WHATSAPP_TEMPLATE_SID) missing.push("WHATSAPP_TEMPLATE_SID");
-    if (!TWILIO_FUNCTIONS_BASE_URL) missing.push("TWILIO_FUNCTIONS_BASE_URL");
-    const errorMsg = `Server configuration error: Missing environment variable(s): ${missing.join(", ")}.`;
-    console.error("[CONFIG ERROR /createGroupConversation]", errorMsg);
+  // --- Env vars ---
+  const REQUIRED = ["ACCOUNT_SID","AUTH_TOKEN","CONVERSATIONS_SERVICE_SID","WHATSAPP_TEMPLATE_SID","TWILIO_FUNCTIONS_BASE_URL"];
+  const missing = REQUIRED.filter(v => !context[v]);
+  if (missing.length) {
     response.setStatusCode(500);
-    response.setBody({ success: false, message: "Server configuration error.", detail: errorMsg });
+    response.setBody({ success:false, message:"Server configuration error.", detail:`Missing ${missing.join(", ")}` });
     return callback(null, response);
   }
-  console.log("[CONFIG /createGroupConversation] Required environment variables are present.");
+  const { CONVERSATIONS_SERVICE_SID, WHATSAPP_TEMPLATE_SID } = context;
 
-  // --- Input Validation & Payload Extraction ---
+  // --- Input ---
   const { friendlyName, description, participants, twilioPhoneNumber } = event;
+  if (!friendlyName) return cbErr(400, "Missing 'friendlyName'.");
+  if (!twilioPhoneNumber) return cbErr(400, "Missing 'twilioPhoneNumber'.");
+  if (!Array.isArray(participants) || participants.length === 0) return cbErr(400, "Missing or empty 'participants' array.");
 
-  if (!friendlyName) {
-    return callback(null, sendErrorResponse(response, 400, "Missing 'friendlyName' for the group."));
+  // Validate sender (accept +E164 or whatsapp:+E164)
+  const proxyE164 = toE164OrNull(twilioPhoneNumber);
+  if (!proxyE164) return cbErr(400, "Twilio WhatsApp number must be +E164 or whatsapp:+E164.", "Example: +14155550123");
+  const proxyWa = toWa(proxyE164);
+
+  // Pre-validate participants; build final payload
+  const prepared = [];
+  const invalid = [];
+  for (const p of participants) {
+    const raw = String(p.identifier || "").trim();
+    if (!raw) { invalid.push({ input:"(empty)", reason:"missing identifier" }); continue; }
+
+    if (raw.startsWith("client:")) {
+      prepared.push({ type:"chat", identity: raw.slice("client:".length) });
+      continue;
+    }
+
+    const e164 = toE164OrNull(raw); // accepts whatsapp:+E164 or +E164
+    if (!e164) { invalid.push({ input: raw, reason: "must be +E164 or whatsapp:+E164" }); continue; }
+
+    prepared.push({ type:"wa", waAddr: toWa(e164) });
   }
-  if (!twilioPhoneNumber) {
-    return callback(null, sendErrorResponse(response, 400, "Missing 'twilioPhoneNumber' for the group."));
-  }
-  if (!participants || !Array.isArray(participants) || participants.length === 0) {
-    return callback(null, sendErrorResponse(response, 400, "Missing or empty 'participants' array."));
+
+  if (invalid.length) {
+    response.setStatusCode(400);
+    response.setBody({ success:false, message:"One or more participants are invalid.", invalidParticipants: invalid });
+    return callback(null, response);
   }
 
   const client = context.getTwilioClient();
-  let newConversation;
 
   try {
-    // Step 1: Create the Conversation
-    console.log(`[CONV /createGroupConversation] Creating conversation: "${friendlyName}"`);
-    const conversationAttributes = JSON.stringify({
+    // Create conversation
+    const attributes = JSON.stringify({
       description: description || "",
-      groupTwilioPhoneNumber: normalizeE164(twilioPhoneNumber), // store clean E.164 (no whatsapp: in attributes)
+      groupTwilioPhoneNumber: proxyE164, // store plain +E164 (attributes only)
       createdBy: "whatsapp_groups_manager"
     });
 
-    newConversation = await client.conversations.v1
+    const conv = await client.conversations.v1
       .services(CONVERSATIONS_SERVICE_SID)
       .conversations
-      .create({
-        friendlyName,
-        attributes: conversationAttributes
-      });
-    console.log(`[CONV /createGroupConversation] Conversation created. Service: ${CONVERSATIONS_SERVICE_SID} SID: ${newConversation.sid}`);
+      .create({ friendlyName, attributes });
 
-    // Ensure the proxy is whatsapp:+E164
-    const twilioWa = asWa(twilioPhoneNumber);
-    if (!twilioWa) {
-      return callback(null, sendErrorResponse(response, 400, "Invalid Twilio WhatsApp number. Provide a valid E.164 sender."));
-    }
-
-    // Step 2: Add Participants
-    const whatsAppParticipantsToNotify = [];
-
-    for (const p of participants) {
-      const raw = (p.identifier || "").trim();
-      if (!raw) {
-        console.warn("[PARTICIPANT] Missing identifier, skipping:", p);
-        continue;
-      }
-
-      // Conversations identity (not WhatsApp)
-      if (raw.startsWith("client:")) {
-        const chatIdentity = raw.slice("client:".length);
-        console.log(`[PARTICIPANT] Adding Chat participant: ${chatIdentity}`);
+    // Add participants
+    const waToNotify = [];
+    for (const n of prepared) {
+      if (n.type === "chat") {
         await client.conversations.v1
           .services(CONVERSATIONS_SERVICE_SID)
-          .conversations(newConversation.sid)
+          .conversations(conv.sid)
           .participants
-          .create({ identity: chatIdentity });
-        continue;
-      }
-
-      // Normalize to whatsapp:+E164
-      const waAddr = asWa(raw);
-      if (!waAddr) {
-        console.warn(`[PARTICIPANT] Invalid phone after normalization, skipping: "${raw}"`);
-        continue;
-      }
-
-      console.log(`[PARTICIPANT] Adding WhatsApp participant: ${waAddr} via proxy ${twilioWa}`);
-      await client.conversations.v1
-        .services(CONVERSATIONS_SERVICE_SID)
-        .conversations(newConversation.sid)
-        .participants
-        .create({
-          "messagingBinding.address": waAddr,
-          "messagingBinding.proxyAddress": twilioWa
-        });
-
-      whatsAppParticipantsToNotify.push(waAddr);
-    }
-
-    console.log(`[PARTICIPANT /createGroupConversation] Finished adding participants. ${whatsAppParticipantsToNotify.length} WhatsApp participants to notify.`);
-
-    // Step 3: Send WhatsApp Template Message to WhatsApp Participants
-    if (whatsAppParticipantsToNotify.length > 0) {
-      console.log(`[WHATSAPP /createGroupConversation] Sending template SID ${WHATSAPP_TEMPLATE_SID} from ${twilioWa}`);
-      for (const waIdentifier of whatsAppParticipantsToNotify) {
-        try {
-          console.log(`[WHATSAPP /createGroupConversation] Sending template to ${waIdentifier}`);
-          await client.messages.create({
-            contentSid: WHATSAPP_TEMPLATE_SID,
-            from: twilioWa,
-            to: waIdentifier
-            // contentVariables: JSON.stringify({ '1': 'User', '2': friendlyName }) // if your template needs variables
+          .create({ identity: n.identity });
+      } else {
+        await client.conversations.v1
+          .services(CONVERSATIONS_SERVICE_SID)
+          .conversations(conv.sid)
+          .participants
+          .create({
+            "messagingBinding.address": n.waAddr,     // MUST be whatsapp:+E164
+            "messagingBinding.proxyAddress": proxyWa  // MUST be whatsapp:+E164
           });
-          console.log(`[WHATSAPP /createGroupConversation] Template message sent to ${waIdentifier}`);
-        } catch (msgError) {
-          console.error(`[WHATSAPP ERROR /createGroupConversation] Failed to send template to ${waIdentifier}:`, msgError);
-        }
+        waToNotify.push(n.waAddr);
       }
     }
 
-    console.log("[SUCCESS /createGroupConversation] Group conversation created and initial notifications attempted.");
+    // Notify WA participants with template (from/to must be whatsapp:+E164)
+    for (const to of waToNotify) {
+      try {
+        await client.messages.create({
+          contentSid: WHATSAPP_TEMPLATE_SID,
+          from: proxyWa,
+          to
+          // contentVariables: JSON.stringify({ '1': 'User', '2': friendlyName })
+        });
+      } catch (e) {
+        console.error(`[WHATSAPP ERROR] Template to ${to} failed:`, e);
+      }
+    }
+
     response.setStatusCode(201);
     response.setBody({
-      success: true,
-      message: "Group conversation created successfully.",
-      conversationSid: newConversation.sid,
-      friendlyName: newConversation.friendlyName,
-      attributes: JSON.parse(newConversation.attributes)
+      success:true,
+      message:"Group conversation created successfully.",
+      conversationSid: conv.sid,
+      friendlyName: conv.friendlyName,
+      attributes: JSON.parse(conv.attributes)
     });
     return callback(null, response);
 
   } catch (error) {
     console.error("[CRITICAL ERROR /createGroupConversation]", error.message, error.stack);
-    return callback(null, sendErrorResponse(response, 500, "Failed to create group conversation.", error.message));
+    response.setStatusCode(500);
+    response.setBody({ success:false, message:"Failed to create group conversation.", detail:error.message });
+    return callback(null, response);
+  }
+
+  function cbErr(code, msg, detail) {
+    response.setStatusCode(code);
+    const body = { success:false, message:msg };
+    if (detail) body.detail = detail;
+    response.setBody(body);
+    return callback(null, response);
   }
 };
-
-// Helper function for sending error responses
-function sendErrorResponse(response, statusCode, message, detail = null) {
-  console.error(`[ERROR RESPONSE /createGroupConversation] Status: ${statusCode}, Message: ${message}, Detail: ${detail}`);
-  response.setStatusCode(statusCode);
-  const errorBody = { success: false, message };
-  if (detail) errorBody.detail = detail;
-  response.setBody(errorBody);
-  return response;
-}
