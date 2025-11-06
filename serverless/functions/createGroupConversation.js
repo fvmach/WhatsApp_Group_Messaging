@@ -37,19 +37,29 @@ exports.handler = async function(context, event, callback) {
   response.appendHeader("Content-Type", "application/json");
   // --- End CORS ---
 
-  // --- Normalization helpers (no longer “expect” whatsapp:) ---
+  // --- Always-WhatsApp helpers ---
   const E164 = /^\+[1-9]\d{1,14}$/;
-
   const stripWa = s => String(s || "").trim().replace(/^whatsapp:/i, "");
   const digitsPlus = s => String(s || "").replace(/[^\d+]/g, "");
   const normalizeE164 = (input) => {
-    // remove whatsapp:, spaces, punctuation
-    const raw = digitsPlus(stripWa(input));
-    // add leading + if absent and looks like an international number
-    if (!raw.startsWith("+") && /^\d{8,15}$/.test(raw)) return `+${raw}`;
+    // Remove whatsapp:, spaces, punctuation
+    let raw = digitsPlus(stripWa(input));
+    if (!raw) return "";
+
+    // Convert 00-prefix international to + (e.g., 0044... -> +44...)
+    if (raw.startsWith("00")) raw = `+${raw.slice(2)}`;
+
+    // Add + if looks like an international number (8–15 digits)
+    if (!raw.startsWith("+") && /^\d{8,15}$/.test(raw)) raw = `+${raw}`;
+
+    // Final sanity: must be valid E.164
+    if (!E164.test(raw)) return "";
     return raw;
   };
-  const asWa = (input) => `whatsapp:${normalizeE164(input)}`;
+  const asWa = (input) => {
+    const e = normalizeE164(input);
+    return e ? `whatsapp:${e}` : "";
+  };
 
   const { ACCOUNT_SID, AUTH_TOKEN, CONVERSATIONS_SERVICE_SID, WHATSAPP_TEMPLATE_SID, TWILIO_FUNCTIONS_BASE_URL } = context;
   if (!ACCOUNT_SID || !AUTH_TOKEN || !CONVERSATIONS_SERVICE_SID || !WHATSAPP_TEMPLATE_SID || !TWILIO_FUNCTIONS_BASE_URL) {
@@ -88,7 +98,7 @@ exports.handler = async function(context, event, callback) {
     console.log(`[CONV /createGroupConversation] Creating conversation: "${friendlyName}"`);
     const conversationAttributes = JSON.stringify({
       description: description || "",
-      groupTwilioPhoneNumber: normalizeE164(twilioPhoneNumber),
+      groupTwilioPhoneNumber: normalizeE164(twilioPhoneNumber), // store clean E.164 (no whatsapp: in attributes)
       createdBy: "whatsapp_groups_manager"
     });
 
@@ -101,7 +111,11 @@ exports.handler = async function(context, event, callback) {
       });
     console.log(`[CONV /createGroupConversation] Conversation created. Service: ${CONVERSATIONS_SERVICE_SID} SID: ${newConversation.sid}`);
 
-    const twilioWa = asWa(twilioPhoneNumber); // ensure proper whatsapp:+ proxy
+    // Ensure the proxy is whatsapp:+E164
+    const twilioWa = asWa(twilioPhoneNumber);
+    if (!twilioWa) {
+      return callback(null, sendErrorResponse(response, 400, "Invalid Twilio WhatsApp number. Provide a valid E.164 sender."));
+    }
 
     // Step 2: Add Participants
     const whatsAppParticipantsToNotify = [];
@@ -113,7 +127,7 @@ exports.handler = async function(context, event, callback) {
         continue;
       }
 
-      // a) Programmable Chat / Conversations identity
+      // Conversations identity (not WhatsApp)
       if (raw.startsWith("client:")) {
         const chatIdentity = raw.slice("client:".length);
         console.log(`[PARTICIPANT] Adding Chat participant: ${chatIdentity}`);
@@ -125,14 +139,13 @@ exports.handler = async function(context, event, callback) {
         continue;
       }
 
-      // b) Treat anything else as a phone number; normalize it
-      const e164 = normalizeE164(raw);
-      if (!E164.test(e164)) {
-        console.warn(`[PARTICIPANT] Invalid phone after normalization, skipping: "${raw}" -> "${e164}"`);
+      // Normalize to whatsapp:+E164
+      const waAddr = asWa(raw);
+      if (!waAddr) {
+        console.warn(`[PARTICIPANT] Invalid phone after normalization, skipping: "${raw}"`);
         continue;
       }
 
-      const waAddr = `whatsapp:${e164}`;
       console.log(`[PARTICIPANT] Adding WhatsApp participant: ${waAddr} via proxy ${twilioWa}`);
       await client.conversations.v1
         .services(CONVERSATIONS_SERVICE_SID)
