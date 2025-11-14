@@ -354,19 +354,6 @@ Twilio Serverless is suitable for demo and testing purposes. In production, you 
 - **Sync Limits**: Each Sync Map can store up to 16KB per item
 - **Conversations Limits**: Check API limits for your account tier
 - **Production Backend**: For high-scale use, migrate to dedicated infrastructure
-
-## Roadmap Suggestions
-
-- Read receipts and typing indicators
-- Multi-conversation interface (tabbed or side-by-side panels)
-- Admin moderation panel with analytics
-- Scheduled messages and broadcast campaigns
-- Rich media support (images, videos, documents)
-- Integration with CRM systems (Salesforce, HubSpot)
-- Message templates and quick replies
-- Conversation tagging and categorization
-- Export conversation history
-
 ## License
 
 This project is provided for educational and demonstration purposes. For production use, follow Twilio’s compliance, security, and deployment best practices.
