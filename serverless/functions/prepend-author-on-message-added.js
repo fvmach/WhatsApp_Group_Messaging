@@ -8,7 +8,7 @@ exports.handler = async function(context, event, callback) {
   try {
     const { EventType, Author, Body, ConversationSid, ParticipantSid } = event;
 
-    if (EventType !== 'onMessageAdded') {
+    if (EventType !== 'onMessageAdd') {
       console.log(`[SKIP] EventType ${EventType} is not handled.`);
       response.setBody({});
       return callback(null, response);
