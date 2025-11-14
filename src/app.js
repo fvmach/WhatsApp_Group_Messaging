@@ -3,7 +3,7 @@ let conversationsClient = null;
 let userContacts = []; // This will be populated by fetchContacts
 let activeConversations = []; // This will be populated by fetchActiveConversations from your Twilio Function
 let originalActiveConversations = []; 
-const FUNCTION_BASE_URL = 'https://whatsapp-group-messaging-9230-dev.twil.io'; // <-- Set your Twilio Function base URL here
+const FUNCTION_BASE_URL = 'https://whatsapp-group-messaging-1361.twil.io'; // <-- Set your Twilio Function base URL here
 
 let groupSearchTerm = '';
 let groupFilterState = 'active'; // e.g., 'active', 'inactive', 'closed', or '' for all
